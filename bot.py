@@ -74,7 +74,6 @@ def back_keyboard() -> InlineKeyboardMarkup:
 def search_result_keyboard() -> InlineKeyboardMarkup:
     """After a search result: offer to search again or go back."""
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("🔍 Search again", callback_data="action:search")],
         [InlineKeyboardButton("« Back to menu",  callback_data="action:menu")],
     ])
 
