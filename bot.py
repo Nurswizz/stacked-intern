@@ -39,7 +39,6 @@ logger = logging.getLogger(__name__)
 
 TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
 
-# free-text input states stored in user_data
 WAITING_SEARCH = 1
 WAITING_FILTER = 2
 
@@ -69,6 +68,23 @@ def main_menu_keyboard(subscribed: bool) -> InlineKeyboardMarkup:
 def back_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("« Back to menu", callback_data="action:menu")]
+    ])
+
+
+def search_result_keyboard() -> InlineKeyboardMarkup:
+    """After a search result: offer to search again or go back."""
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("🔍 Search again", callback_data="action:search")],
+        [InlineKeyboardButton("« Back to menu",  callback_data="action:menu")],
+    ])
+
+
+def filter_result_keyboard() -> InlineKeyboardMarkup:
+    """After setting a filter: offer to change it or go back."""
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("🔑 Change filter", callback_data="action:filter")],
+        [InlineKeyboardButton("❌ Clear filter",   callback_data="action:filter_off")],
+        [InlineKeyboardButton("« Back to menu",   callback_data="action:menu")],
     ])
 
 
@@ -119,6 +135,7 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     name = update.effective_user.first_name or "there"
     subscribe_user(uid)
     user = get_user(uid)
+    ctx.user_data.pop("state", None)
     await update.message.reply_text(
         _welcome_text(name, bool(user and user["active"]), count_internships()),
         parse_mode="Markdown",
@@ -130,11 +147,11 @@ async def cmd_menu(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     uid  = update.effective_user.id
     name = update.effective_user.first_name or "there"
     user = get_user(uid)
-    subscribed = bool(user and user["active"])
+    ctx.user_data.pop("state", None)
     await update.message.reply_text(
-        _welcome_text(name, subscribed, count_internships()),
+        _welcome_text(name, bool(user and user["active"]), count_internships()),
         parse_mode="Markdown",
-        reply_markup=main_menu_keyboard(subscribed=subscribed),
+        reply_markup=main_menu_keyboard(subscribed=bool(user and user["active"])),
     )
 
 
@@ -149,6 +166,7 @@ async def on_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     if action == "start":
         subscribe_user(uid)
+        ctx.user_data.pop("state", None)
         await query.edit_message_text(
             _welcome_text(name, True, count_internships()),
             parse_mode="Markdown",
@@ -157,6 +175,7 @@ async def on_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     elif action == "stop":
         unsubscribe_user(uid)
+        ctx.user_data.pop("state", None)
         await query.edit_message_text(
             "🔕 Unsubscribed. You won't receive any more alerts.",
             reply_markup=InlineKeyboardMarkup([[
@@ -165,13 +184,12 @@ async def on_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         )
 
     elif action == "list":
+        ctx.user_data.pop("state", None)
         rows = get_recent(limit=10)
-        if not rows:
-            text = "No internships in the database yet."
-        else:
-            text = "📋 *Last 10 internships:*\n\n" + "\n".join(
-                _fmt(r, i + 1) for i, r in enumerate(rows)
-            )
+        text = (
+            "📋 *Last 10 internships:*\n\n" + "\n".join(_fmt(r, i + 1) for i, r in enumerate(rows))
+            if rows else "No internships in the database yet."
+        )
         await query.edit_message_text(
             text, parse_mode="Markdown",
             disable_web_page_preview=True,
@@ -179,6 +197,7 @@ async def on_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         )
 
     elif action == "search":
+        # Enter search loop — prompt for keyword
         ctx.user_data["state"] = WAITING_SEARCH
         await query.edit_message_text(
             "🔍 Send me a keyword to search (role or company name):",
@@ -188,6 +207,7 @@ async def on_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         )
 
     elif action == "filter":
+        # Enter filter loop — prompt for keyword
         user = get_user(uid)
         current = user["keyword_filter"] if user else None
         current_str = f"\n\nCurrent filter: *{current}*" if current else ""
@@ -202,12 +222,14 @@ async def on_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     elif action == "filter_off":
         set_user_filter(uid, None)
+        ctx.user_data.pop("state", None)
         await query.edit_message_text(
             "✅ Filter cleared. You'll receive all new listings.",
-            reply_markup=back_keyboard(),
+            reply_markup=filter_result_keyboard(),
         )
 
     elif action == "status":
+        ctx.user_data.pop("state", None)
         user = get_user(uid)
         if not user:
             text = "You're not subscribed. Press Subscribe to start."
@@ -232,7 +254,7 @@ async def on_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         )
 
 
-# ── free-text handler (receives search/filter keywords) ──────────────────────
+# ── free-text handler ─────────────────────────────────────────────────────────
 
 async def on_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     state = ctx.user_data.get("state")
@@ -245,20 +267,29 @@ async def on_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             f"🔍 *Results for \"{kw}\":*\n\n" + "\n".join(_fmt(r, i + 1) for i, r in enumerate(rows))
             if rows else f"No results for *{kw}*."
         )
-        ctx.user_data.pop("state", None)
+        # Stay in search loop — keyboard offers "Search again" or "Back"
         await update.message.reply_text(
             text, parse_mode="Markdown",
             disable_web_page_preview=True,
-            reply_markup=back_keyboard(),
+            reply_markup=search_result_keyboard(),
         )
+        # State stays WAITING_SEARCH so next free-text message is another search
 
     elif state == WAITING_FILTER:
         kw = update.message.text.strip()
         set_user_filter(uid, kw)
+        # Exit filter loop after setting
         ctx.user_data.pop("state", None)
         await update.message.reply_text(
             f"✅ Filter set to *{kw}*. You'll only receive matching alerts.",
             parse_mode="Markdown",
+            reply_markup=filter_result_keyboard(),
+        )
+
+    else:
+        # Not in any state — nudge to use the menu
+        await update.message.reply_text(
+            "Use /menu to open the main menu.",
             reply_markup=back_keyboard(),
         )
 
@@ -266,7 +297,6 @@ async def on_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 # ── broadcast (called from worker) ───────────────────────────────────────────
 
 async def broadcast_new(app: Application, new_entries: list[dict]):
-    """Fan out new listings to all active subscribers respecting their filters."""
     subscribers = get_subscribers()
     for user in subscribers:
         kw = user["keyword_filter"]
