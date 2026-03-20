@@ -1,19 +1,17 @@
 """
-worker.py – 5-minute scheduler integrated with the Telegram bot.
+worker.py – Telegram bot + periodic scrape checker.
 
-Uses ETag-based conditional requests so the table is only parsed when
-the GitHub file actually changes — safe to run every 5 minutes.
+Uses asyncio.sleep for scheduling instead of the `schedule` library,
+which cannot run inside an already-running event loop.
 
 Run:
-    python worker.py          # starts bot + scheduler together
-    python worker.py --once   # single check then exit (no bot, good for cron)
+    python worker.py          # starts bot + 5-minute checker
+    python worker.py --once   # single check, no bot
 """
 
 import argparse
 import asyncio
 import logging
-
-import schedule
 
 from db import init_db, upsert_internships, count_internships
 from scraper import fetch_if_changed
@@ -25,7 +23,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-CHECK_INTERVAL_MINUTES = 5
+CHECK_INTERVAL_SECONDS = 5 * 60  # 5 minutes
 
 
 async def run_check(app=None):
@@ -34,13 +32,11 @@ async def run_check(app=None):
     rows = fetch_if_changed()
 
     if rows is None:
-        # 304 Not Modified — nothing to do
-        logger.info("=== No changes, skipping DB update ===\n")
+        logger.info("=== No changes (304 Not Modified), skipping ===\n")
         return
 
     if not rows:
-        # Network error or empty parse
-        logger.warning("=== Fetch returned no rows, skipping DB update ===\n")
+        logger.warning("=== Fetch returned no rows, skipping ===\n")
         return
 
     new_entries = upsert_internships(rows)
@@ -60,19 +56,16 @@ async def run_check(app=None):
     logger.info("=== Check complete ===\n")
 
 
-def run_check_sync(app=None):
-    """Sync wrapper so the `schedule` library can call the async function."""
-    loop = asyncio.get_event_loop()
-    loop.run_until_complete(run_check(app))
+async def periodic_checker(app=None):
+    """Runs run_check every CHECK_INTERVAL_SECONDS forever."""
+    while True:
+        await asyncio.sleep(CHECK_INTERVAL_SECONDS)
+        await run_check(app)
 
 
 async def main():
     parser = argparse.ArgumentParser(description="Internship tracker worker")
-    parser.add_argument(
-        "--once",
-        action="store_true",
-        help="Run a single check and exit (no bot polling)",
-    )
+    parser.add_argument("--once", action="store_true", help="Single check, no bot")
     args = parser.parse_args()
 
     init_db()
@@ -84,14 +77,12 @@ async def main():
     from bot import build_app
     app = build_app()
 
-    # Always do one check immediately on startup
+    # Run first check immediately on startup
     await run_check(app)
 
-    # Schedule subsequent checks every 5 minutes
-    schedule.every(CHECK_INTERVAL_MINUTES).minutes.do(run_check_sync, app=app)
     logger.info(
         "Scheduler ready — checking every %d minute(s). Starting bot…",
-        CHECK_INTERVAL_MINUTES,
+        CHECK_INTERVAL_SECONDS // 60,
     )
 
     async with app:
@@ -99,9 +90,7 @@ async def main():
         await app.updater.start_polling(drop_pending_updates=True)
 
         try:
-            while True:
-                schedule.run_pending()
-                await asyncio.sleep(15)   # tight enough not to miss a 5-min slot
+            await periodic_checker(app)   # runs forever, yields to event loop between sleeps
         except (KeyboardInterrupt, asyncio.CancelledError):
             logger.info("Shutting down…")
         finally:
