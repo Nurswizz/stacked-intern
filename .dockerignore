@@ -1,0 +1,7 @@
+.env
+*.db
+.last_etag
+__pycache__
+*.pyc
+*.pyo
+.git

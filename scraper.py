@@ -1,4 +1,5 @@
 import logging
+import os
 import re
 import requests
 from bs4 import BeautifulSoup
@@ -7,7 +8,7 @@ from pathlib import Path
 logger = logging.getLogger(__name__)
 
 URL       = "https://raw.githubusercontent.com/SimplifyJobs/Summer2026-Internships/dev/README.md"
-ETAG_FILE = Path(__file__).parent / ".last_etag"
+ETAG_FILE = Path(os.environ.get("ETAG_FILE", Path(__file__).parent / ".last_etag"))
 
 
 def _clean_location(td) -> str:
