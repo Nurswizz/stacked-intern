@@ -3,7 +3,7 @@ from datetime import datetime
 from typing import Optional
 
 from sqlalchemy import (
-    create_engine, Column, Integer, BigInteger, Text, Timestamp,
+    create_engine, Column, Integer, BigInteger, Text, DateTime,
     UniqueConstraint, func, or_
 )
 from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
@@ -31,7 +31,7 @@ class Internship(Base):
     apply_link    = Column(Text)
     simplify_link = Column(Text)
     age           = Column(Text)
-    seen_at       = Column(Timestamp, server_default=func.now())
+    seen_at       = Column(DateTime, server_default=func.now())
 
     def to_dict(self) -> dict:
         return {
@@ -52,7 +52,7 @@ class Subscriber(Base):
     chat_id        = Column(BigInteger, primary_key=True)
     active         = Column(Integer, nullable=False, default=1)
     keyword_filter = Column(Text)
-    joined_at      = Column(Timestamp, server_default=func.now())
+    joined_at      = Column(DateTime, server_default=func.now())
 
     def to_dict(self) -> dict:
         return {
