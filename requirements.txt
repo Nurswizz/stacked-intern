@@ -5,3 +5,4 @@ python-dotenv>=0.19
 fastapi
 pydantic
 sqlalchemy
+uvicorn
