@@ -37,10 +37,27 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
+TOKEN    = os.environ["TELEGRAM_BOT_TOKEN"]
+ADMIN_ID = int(os.environ.get("ADMIN_ID", 0))   # your Telegram user ID
 
 WAITING_SEARCH = 1
 WAITING_FILTER = 2
+
+# ── maintenance mode (in-memory flag) ─────────────────────────────────────────
+# Toggled via /maintenance on|off by admin.
+# Resets to False on restart — set MAINTENANCE_MODE=1 env var for persistent off.
+
+MAINTENANCE = {"on": os.environ.get("MAINTENANCE_MODE", "0") == "1"}
+
+MAINTENANCE_TEXT = (
+    "🔧 *Technical works in progress.*\n\n"
+    "The bot is temporarily unavailable. Please try again later."
+)
+
+
+def is_maintenance(uid: int) -> bool:
+    """Returns True if maintenance is on AND user is not the admin."""
+    return MAINTENANCE["on"] and uid != ADMIN_ID
 
 
 # ── keyboards ─────────────────────────────────────────────────────────────────
@@ -72,14 +89,12 @@ def back_keyboard() -> InlineKeyboardMarkup:
 
 
 def search_result_keyboard() -> InlineKeyboardMarkup:
-    """After a search result: offer to search again or go back."""
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("« Back to menu",  callback_data="action:menu")],
+        [InlineKeyboardButton("« Back to menu", callback_data="action:menu")],
     ])
 
 
 def filter_result_keyboard() -> InlineKeyboardMarkup:
-    """After setting a filter: offer to change it or go back."""
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("🔑 Change filter", callback_data="action:filter")],
         [InlineKeyboardButton("❌ Clear filter",   callback_data="action:filter_off")],
@@ -127,11 +142,41 @@ def _welcome_text(name: str, subscribed: bool, total: int) -> str:
     )
 
 
+# ── /maintenance (admin only) ─────────────────────────────────────────────────
+
+async def cmd_maintenance(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    uid = update.effective_user.id
+    if uid != ADMIN_ID:
+        await update.message.reply_text("⛔ Admin only.")
+        return
+
+    arg = (ctx.args[0].lower() if ctx.args else "")
+
+    if arg == "on":
+        MAINTENANCE["on"] = True
+        await update.message.reply_text("🔧 Maintenance mode ON. Users will see the maintenance message.")
+    elif arg == "off":
+        MAINTENANCE["on"] = False
+        await update.message.reply_text("✅ Maintenance mode OFF. Bot is back to normal.")
+    else:
+        status = "ON 🔧" if MAINTENANCE["on"] else "OFF ✅"
+        await update.message.reply_text(
+            f"Maintenance is currently *{status}*\n\n"
+            "Usage:\n`/maintenance on` – enable\n`/maintenance off` – disable",
+            parse_mode="Markdown",
+        )
+
+
 # ── /start & /menu ────────────────────────────────────────────────────────────
 
 async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     uid  = update.effective_user.id
     name = update.effective_user.first_name or "there"
+
+    if is_maintenance(uid):
+        await update.message.reply_text(MAINTENANCE_TEXT, parse_mode="Markdown")
+        return
+
     subscribe_user(uid)
     user = get_user(uid)
     ctx.user_data.pop("state", None)
@@ -145,6 +190,11 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 async def cmd_menu(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     uid  = update.effective_user.id
     name = update.effective_user.first_name or "there"
+
+    if is_maintenance(uid):
+        await update.message.reply_text(MAINTENANCE_TEXT, parse_mode="Markdown")
+        return
+
     user = get_user(uid)
     ctx.user_data.pop("state", None)
     await update.message.reply_text(
@@ -159,9 +209,14 @@ async def cmd_menu(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 async def on_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     query  = update.callback_query
     await query.answer()
-    action = query.data.split(":", 1)[1]
     uid    = query.from_user.id
     name   = query.from_user.first_name or "there"
+
+    if is_maintenance(uid):
+        await query.edit_message_text(MAINTENANCE_TEXT, parse_mode="Markdown")
+        return
+
+    action = query.data.split(":", 1)[1]
 
     if action == "start":
         subscribe_user(uid)
@@ -196,7 +251,6 @@ async def on_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         )
 
     elif action == "search":
-        # Enter search loop — prompt for keyword
         ctx.user_data["state"] = WAITING_SEARCH
         await query.edit_message_text(
             "🔍 Send me a keyword to search (role or company name):",
@@ -206,7 +260,6 @@ async def on_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         )
 
     elif action == "filter":
-        # Enter filter loop — prompt for keyword
         user = get_user(uid)
         current = user["keyword_filter"] if user else None
         current_str = f"\n\nCurrent filter: *{current}*" if current else ""
@@ -256,8 +309,12 @@ async def on_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 # ── free-text handler ─────────────────────────────────────────────────────────
 
 async def on_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    state = ctx.user_data.get("state")
     uid   = update.effective_user.id
+    state = ctx.user_data.get("state")
+
+    if is_maintenance(uid):
+        await update.message.reply_text(MAINTENANCE_TEXT, parse_mode="Markdown")
+        return
 
     if state == WAITING_SEARCH:
         kw   = update.message.text.strip()
@@ -266,18 +323,15 @@ async def on_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             f"🔍 *Results for \"{kw}\":*\n\n" + "\n".join(_fmt(r, i + 1) for i, r in enumerate(rows))
             if rows else f"No results for *{kw}*."
         )
-        # Stay in search loop — keyboard offers "Search again" or "Back"
         await update.message.reply_text(
             text, parse_mode="Markdown",
             disable_web_page_preview=True,
             reply_markup=search_result_keyboard(),
         )
-        # State stays WAITING_SEARCH so next free-text message is another search
 
     elif state == WAITING_FILTER:
         kw = update.message.text.strip()
         set_user_filter(uid, kw)
-        # Exit filter loop after setting
         ctx.user_data.pop("state", None)
         await update.message.reply_text(
             f"✅ Filter set to *{kw}*. You'll only receive matching alerts.",
@@ -286,7 +340,6 @@ async def on_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         )
 
     else:
-        # Not in any state — nudge to use the menu
         await update.message.reply_text(
             "Use /menu to open the main menu.",
             reply_markup=back_keyboard(),
@@ -327,8 +380,9 @@ async def broadcast_new(app: Application, new_entries: list[dict]):
 def build_app() -> Application:
     init_db()
     app = Application.builder().token(TOKEN).build()
-    app.add_handler(CommandHandler("start", cmd_start))
-    app.add_handler(CommandHandler("menu",  cmd_menu))
+    app.add_handler(CommandHandler("start",       cmd_start))
+    app.add_handler(CommandHandler("menu",        cmd_menu))
+    app.add_handler(CommandHandler("maintenance", cmd_maintenance))
     app.add_handler(CallbackQueryHandler(on_button, pattern=r"^action:"))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))
     return app
