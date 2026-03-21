@@ -2,3 +2,6 @@ beautifulsoup4>=4.12
 requests>=2.31
 python-telegram-bot>=21.0
 python-dotenv>=0.19
+fastapi
+pydantic
+sqlalchemy

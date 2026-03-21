@@ -1,138 +1,192 @@
 import os
-import sqlite3
-from pathlib import Path
+from datetime import datetime
+from typing import Optional
 
-DB_PATH = Path(os.environ.get("DB_PATH", Path(__file__).parent / "internships.db"))
+from sqlalchemy import (
+    create_engine, Column, Integer, BigInteger, Text, Timestamp,
+    UniqueConstraint, func, or_
+)
+from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
+
+DATABASE_URL = os.environ["DATABASE_URL"]
+
+engine = create_engine(DATABASE_URL, pool_pre_ping=True)
+SessionLocal = sessionmaker(bind=engine)
 
 
-def get_conn() -> sqlite3.Connection:
-    DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
-    return conn
+# ── models ────────────────────────────────────────────────────────────────────
 
+class Base(DeclarativeBase):
+    pass
+
+
+class Internship(Base):
+    __tablename__ = "internships"
+    __table_args__ = (UniqueConstraint("company", "role", "apply_link"),)
+
+    id            = Column(Integer, primary_key=True, autoincrement=True)
+    company       = Column(Text, nullable=False)
+    role          = Column(Text, nullable=False)
+    location      = Column(Text)
+    apply_link    = Column(Text)
+    simplify_link = Column(Text)
+    age           = Column(Text)
+    seen_at       = Column(Timestamp, server_default=func.now())
+
+    def to_dict(self) -> dict:
+        return {
+            "id":            self.id,
+            "company":       self.company,
+            "role":          self.role,
+            "location":      self.location,
+            "apply_link":    self.apply_link,
+            "simplify_link": self.simplify_link,
+            "age":           self.age,
+            "seen_at":       self.seen_at,
+        }
+
+
+class Subscriber(Base):
+    __tablename__ = "subscribers"
+
+    chat_id        = Column(BigInteger, primary_key=True)
+    active         = Column(Integer, nullable=False, default=1)
+    keyword_filter = Column(Text)
+    joined_at      = Column(Timestamp, server_default=func.now())
+
+    def to_dict(self) -> dict:
+        return {
+            "chat_id":        self.chat_id,
+            "active":         self.active,
+            "keyword_filter": self.keyword_filter,
+            "joined_at":      self.joined_at,
+        }
+
+
+# ── setup ─────────────────────────────────────────────────────────────────────
 
 def init_db():
-    with get_conn() as conn:
-        # internships table
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS internships (
-                id              INTEGER PRIMARY KEY AUTOINCREMENT,
-                company         TEXT NOT NULL,
-                role            TEXT NOT NULL,
-                location        TEXT,
-                apply_link      TEXT,
-                simplify_link   TEXT,
-                age             TEXT,
-                seen_at         TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                UNIQUE(company, role, apply_link)
-            )
-        """)
-        # subscribers table
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS subscribers (
-                chat_id         INTEGER PRIMARY KEY,
-                active          INTEGER NOT NULL DEFAULT 1,
-                keyword_filter  TEXT,
-                joined_at       TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        """)
-        conn.commit()
+    Base.metadata.create_all(engine)
+
+
+def get_db() -> Session:
+    """Use as a context manager: with get_db() as db: ..."""
+    return SessionLocal()
 
 
 # ── internship helpers ────────────────────────────────────────────────────────
 
 def upsert_internships(rows: list[dict]) -> list[dict]:
-    """Insert new rows; return only those that were actually new."""
     new_entries = []
-    with get_conn() as conn:
+    with get_db() as db:
         for row in rows:
-            cur = conn.execute(
-                """
-                INSERT OR IGNORE INTO internships
-                    (company, role, location, apply_link, simplify_link, age)
-                VALUES
-                    (:company, :role, :location, :apply_link, :simplify_link, :age)
-                """,
-                row,
-            )
-            if cur.rowcount == 1:
+            exists = db.query(Internship).filter_by(
+                company=row["company"],
+                role=row["role"],
+                apply_link=row["apply_link"],
+            ).first()
+            if not exists:
+                entry = Internship(**row)
+                db.add(entry)
                 new_entries.append(row)
-        conn.commit()
+        db.commit()
     return new_entries
 
 
 def count_internships() -> int:
-    with get_conn() as conn:
-        return conn.execute("SELECT COUNT(*) FROM internships").fetchone()[0]
+    with get_db() as db:
+        return db.query(func.count(Internship.id)).scalar()
 
 
 def get_recent(limit: int = 10) -> list[dict]:
-    with get_conn() as conn:
-        rows = conn.execute(
-            "SELECT * FROM internships ORDER BY seen_at DESC LIMIT ?", (limit,)
-        ).fetchall()
-    return [dict(r) for r in rows]
+    with get_db() as db:
+        rows = (
+            db.query(Internship)
+            .order_by(Internship.seen_at.desc())
+            .limit(limit)
+            .all()
+        )
+    return [r.to_dict() for r in rows]
 
 
 def search_internships(keyword: str, limit: int = 10) -> list[dict]:
-    kw = f"%{keyword}%"
-    with get_conn() as conn:
-        rows = conn.execute(
-            """
-            SELECT * FROM internships
-            WHERE company LIKE ? OR role LIKE ?
-            ORDER BY seen_at DESC
-            LIMIT ?
-            """,
-            (kw, kw, limit),
-        ).fetchall()
-    return [dict(r) for r in rows]
+    with get_db() as db:
+        rows = (
+            db.query(Internship)
+            .filter(or_(
+                Internship.company.ilike(f"%{keyword}%"),
+                Internship.role.ilike(f"%{keyword}%"),
+            ))
+            .order_by(Internship.seen_at.desc())
+            .limit(limit)
+            .all()
+        )
+    return [r.to_dict() for r in rows]
+
+
+def list_internships(
+    search:   str | None = None,
+    company:  str | None = None,
+    location: str | None = None,
+    limit:    int = 50,
+    offset:   int = 0,
+) -> tuple[list[dict], int]:
+    with get_db() as db:
+        q = db.query(Internship)
+
+        if search:
+            q = q.filter(or_(
+                Internship.company.ilike(f"%{search}%"),
+                Internship.role.ilike(f"%{search}%"),
+            ))
+        if company:
+            q = q.filter(Internship.company.ilike(f"%{company}%"))
+        if location:
+            q = q.filter(Internship.location.ilike(f"%{location}%"))
+
+        total = q.count()
+        rows  = q.order_by(Internship.seen_at.desc()).offset(offset).limit(limit).all()
+
+    return [r.to_dict() for r in rows], total
 
 
 # ── subscriber helpers ────────────────────────────────────────────────────────
 
 def subscribe_user(chat_id: int):
-    with get_conn() as conn:
-        conn.execute(
-            """
-            INSERT INTO subscribers (chat_id, active)
-            VALUES (?, 1)
-            ON CONFLICT(chat_id) DO UPDATE SET active = 1
-            """,
-            (chat_id,),
-        )
-        conn.commit()
+    with get_db() as db:
+        user = db.query(Subscriber).filter_by(chat_id=chat_id).first()
+        if user:
+            user.active = 1
+        else:
+            db.add(Subscriber(chat_id=chat_id, active=1))
+        db.commit()
 
 
 def unsubscribe_user(chat_id: int):
-    with get_conn() as conn:
-        conn.execute(
-            "UPDATE subscribers SET active = 0 WHERE chat_id = ?", (chat_id,)
-        )
-        conn.commit()
+    with get_db() as db:
+        user = db.query(Subscriber).filter_by(chat_id=chat_id).first()
+        if user:
+            user.active = 0
+            db.commit()
 
 
 def set_user_filter(chat_id: int, keyword: str | None):
-    with get_conn() as conn:
-        conn.execute(
-            "UPDATE subscribers SET keyword_filter = ? WHERE chat_id = ?",
-            (keyword, chat_id),
-        )
-        conn.commit()
+    with get_db() as db:
+        user = db.query(Subscriber).filter_by(chat_id=chat_id).first()
+        if user:
+            user.keyword_filter = keyword
+            db.commit()
 
 
-def get_subscribers() -> list[dict]:
-    with get_conn() as conn:
-        rows = conn.execute(
-            "SELECT * FROM subscribers WHERE active = 1"
-        ).fetchall()
-    return [dict(r) for r in rows]
+def get_subscribers(active_only: bool = True) -> list[dict]:
+    with get_db() as db:
+        q = db.query(Subscriber)
+        if active_only:
+            q = q.filter_by(active=1)
+        return [r.to_dict() for r in q.all()]
 
 
 def get_user(chat_id: int) -> dict | None:
-    with get_conn() as conn:
-        row = conn.execute(
-            "SELECT * FROM subscribers WHERE chat_id = ?", (chat_id,)
-        ).fetchone()
-    return dict(row) if row else None
+    with get_db() as db:
+        user = db.query(Subscriber).filter_by(chat_id=chat_id).first()
+    return user.to_dict() if user else None
