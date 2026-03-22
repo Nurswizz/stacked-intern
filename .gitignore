@@ -3,3 +3,4 @@ venv/
 internships.db
 __pycache__/
 internships.csv
+.last_etag
