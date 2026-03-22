@@ -8,6 +8,9 @@ from sqlalchemy import (
 )
 from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
 
+from dotenv import load_dotenv
+load_dotenv()
+
 DATABASE_URL = os.environ["DATABASE_URL"]
 
 engine = create_engine(DATABASE_URL, pool_pre_ping=True)

@@ -28,6 +28,7 @@ from db import (
     search_internships,
     count_internships,
     get_user,
+    list_internships,
 )
 
 logging.basicConfig(
@@ -38,17 +39,14 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 TOKEN    = os.environ["TELEGRAM_BOT_TOKEN"]
-ADMIN_ID = int(os.environ.get("ADMIN_ID", 0))   # your Telegram user ID
+ADMIN_ID = int(os.environ.get("ADMIN_ID", 0))
 
 WAITING_SEARCH = 1
 WAITING_FILTER = 2
 
-# ── maintenance mode (in-memory flag) ─────────────────────────────────────────
-# Toggled via /maintenance on|off by admin.
-# Resets to False on restart — set MAINTENANCE_MODE=1 env var for persistent off.
+PAGE_SIZE = 10
 
 MAINTENANCE = {"on": os.environ.get("MAINTENANCE_MODE", "0") == "1"}
-
 MAINTENANCE_TEXT = (
     "🔧 *Technical works in progress.*\n\n"
     "The bot is temporarily unavailable. Please try again later."
@@ -56,7 +54,6 @@ MAINTENANCE_TEXT = (
 
 
 def is_maintenance(uid: int) -> bool:
-    """Returns True if maintenance is on AND user is not the admin."""
     return MAINTENANCE["on"] and uid != ADMIN_ID
 
 
@@ -71,7 +68,7 @@ def main_menu_keyboard(subscribed: bool) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
         [sub_btn],
         [
-            InlineKeyboardButton("📋 Recent listings", callback_data="action:list"),
+            InlineKeyboardButton("📋 Recent listings", callback_data="action:list:0"),
             InlineKeyboardButton("🔍 Search",          callback_data="action:search"),
         ],
         [
@@ -99,6 +96,31 @@ def filter_result_keyboard() -> InlineKeyboardMarkup:
         [InlineKeyboardButton("🔑 Change filter", callback_data="action:filter")],
         [InlineKeyboardButton("❌ Clear filter",   callback_data="action:filter_off")],
         [InlineKeyboardButton("« Back to menu",   callback_data="action:menu")],
+    ])
+
+
+def pagination_keyboard(
+    page: int,
+    total: int,
+    action_prefix: str,   # e.g. "list" or "search:python"
+) -> InlineKeyboardMarkup:
+    """Build prev/next pagination row + back button."""
+    total_pages = max(1, (total + PAGE_SIZE - 1) // PAGE_SIZE)
+    nav = []
+    if page > 0:
+        nav.append(InlineKeyboardButton(
+            "« Prev", callback_data=f"action:{action_prefix}:{page - 1}"
+        ))
+    nav.append(InlineKeyboardButton(
+        f"{page + 1}/{total_pages}", callback_data="action:noop"
+    ))
+    if (page + 1) * PAGE_SIZE < total:
+        nav.append(InlineKeyboardButton(
+            "Next »", callback_data=f"action:{action_prefix}:{page + 1}"
+        ))
+    return InlineKeyboardMarkup([
+        nav,
+        [InlineKeyboardButton("« Back to menu", callback_data="action:menu")],
     ])
 
 
@@ -142,6 +164,13 @@ def _welcome_text(name: str, subscribed: bool, total: int) -> str:
     )
 
 
+def _page_text(rows: list[dict], page: int, total: int, title: str) -> str:
+    start = page * PAGE_SIZE + 1
+    header = f"{title} _(showing {start}–{min(start + PAGE_SIZE - 1, total)} of {total})_\n\n"
+    body   = "\n".join(_fmt(r, start + i) for i, r in enumerate(rows))
+    return header + body
+
+
 # ── /maintenance (admin only) ─────────────────────────────────────────────────
 
 async def cmd_maintenance(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -151,18 +180,17 @@ async def cmd_maintenance(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
 
     arg = (ctx.args[0].lower() if ctx.args else "")
-
     if arg == "on":
         MAINTENANCE["on"] = True
-        await update.message.reply_text("🔧 Maintenance mode ON. Users will see the maintenance message.")
+        await update.message.reply_text("🔧 Maintenance mode ON.")
     elif arg == "off":
         MAINTENANCE["on"] = False
-        await update.message.reply_text("✅ Maintenance mode OFF. Bot is back to normal.")
+        await update.message.reply_text("✅ Maintenance mode OFF.")
     else:
         status = "ON 🔧" if MAINTENANCE["on"] else "OFF ✅"
         await update.message.reply_text(
             f"Maintenance is currently *{status}*\n\n"
-            "Usage:\n`/maintenance on` – enable\n`/maintenance off` – disable",
+            "Usage:\n`/maintenance on`\n`/maintenance off`",
             parse_mode="Markdown",
         )
 
@@ -172,11 +200,9 @@ async def cmd_maintenance(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     uid  = update.effective_user.id
     name = update.effective_user.first_name or "there"
-
     if is_maintenance(uid):
         await update.message.reply_text(MAINTENANCE_TEXT, parse_mode="Markdown")
         return
-
     subscribe_user(uid)
     user = get_user(uid)
     ctx.user_data.pop("state", None)
@@ -190,17 +216,52 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 async def cmd_menu(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     uid  = update.effective_user.id
     name = update.effective_user.first_name or "there"
-
     if is_maintenance(uid):
         await update.message.reply_text(MAINTENANCE_TEXT, parse_mode="Markdown")
         return
-
     user = get_user(uid)
     ctx.user_data.pop("state", None)
     await update.message.reply_text(
         _welcome_text(name, bool(user and user["active"]), count_internships()),
         parse_mode="Markdown",
         reply_markup=main_menu_keyboard(subscribed=bool(user and user["active"])),
+    )
+
+
+# ── helpers ───────────────────────────────────────────────────────────────────
+
+async def _show_list_page(query, page: int):
+    """Render a page of recent listings."""
+    rows, total = list_internships(limit=PAGE_SIZE, offset=page * PAGE_SIZE)
+    if not rows:
+        await query.edit_message_text(
+            "No internships in the database yet.",
+            reply_markup=back_keyboard(),
+        )
+        return
+    await query.edit_message_text(
+        _page_text(rows, page, total, "📋 *Recent listings*"),
+        parse_mode="Markdown",
+        disable_web_page_preview=True,
+        reply_markup=pagination_keyboard(page, total, "list"),
+    )
+
+
+async def _show_search_page(query, keyword: str, page: int):
+    """Render a page of search results."""
+    rows, total = list_internships(search=keyword, limit=PAGE_SIZE, offset=page * PAGE_SIZE)
+    if not rows:
+        await query.edit_message_text(
+            f"No results for *{keyword}*.",
+            parse_mode="Markdown",
+            reply_markup=back_keyboard(),
+        )
+        return
+    await query.edit_message_text(
+        _page_text(rows, page, total, f"🔍 *Results for \"{keyword}\"*"),
+        parse_mode="Markdown",
+        disable_web_page_preview=True,
+        reply_markup=pagination_keyboard(page, total, f"search:{keyword}"),
     )
 
 
@@ -216,9 +277,15 @@ async def on_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text(MAINTENANCE_TEXT, parse_mode="Markdown")
         return
 
-    action = query.data.split(":", 1)[1]
+    # callback_data format: "action:<action>[:<arg>][:<page>]"
+    parts  = query.data.split(":", 2)
+    action = parts[1]
+    rest   = parts[2] if len(parts) > 2 else ""
 
-    if action == "start":
+    if action == "noop":
+        return
+
+    elif action == "start":
         subscribe_user(uid)
         ctx.user_data.pop("state", None)
         await query.edit_message_text(
@@ -239,25 +306,28 @@ async def on_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     elif action == "list":
         ctx.user_data.pop("state", None)
-        rows = get_recent(limit=10)
-        text = (
-            "📋 *Last 10 internships:*\n\n" + "\n".join(_fmt(r, i + 1) for i, r in enumerate(rows))
-            if rows else "No internships in the database yet."
-        )
-        await query.edit_message_text(
-            text, parse_mode="Markdown",
-            disable_web_page_preview=True,
-            reply_markup=back_keyboard(),
-        )
+        page = int(rest) if rest.isdigit() else 0
+        await _show_list_page(query, page)
 
     elif action == "search":
-        ctx.user_data["state"] = WAITING_SEARCH
-        await query.edit_message_text(
-            "🔍 Send me a keyword to search (role or company name):",
-            reply_markup=InlineKeyboardMarkup([[
-                InlineKeyboardButton("« Cancel", callback_data="action:menu")
-            ]]),
-        )
+        # rest is either empty (initial prompt) or "keyword:page"
+        if not rest:
+            # Prompt user to type keyword
+            ctx.user_data["state"] = WAITING_SEARCH
+            await query.edit_message_text(
+                "🔍 Send me a keyword to search (role or company name):",
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton("« Cancel", callback_data="action:menu")
+                ]]),
+            )
+        else:
+            # rest = "keyword:page" or just "keyword" (page 0)
+            if ":" in rest:
+                kw, pg = rest.rsplit(":", 1)
+                page = int(pg) if pg.isdigit() else 0
+            else:
+                kw, page = rest, 0
+            await _show_search_page(query, kw, page)
 
     elif action == "filter":
         user = get_user(uid)
@@ -317,17 +387,22 @@ async def on_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
 
     if state == WAITING_SEARCH:
-        kw   = update.message.text.strip()
-        rows = search_internships(kw, limit=10)
-        text = (
-            f"🔍 *Results for \"{kw}\":*\n\n" + "\n".join(_fmt(r, i + 1) for i, r in enumerate(rows))
-            if rows else f"No results for *{kw}*."
-        )
-        await update.message.reply_text(
-            text, parse_mode="Markdown",
-            disable_web_page_preview=True,
-            reply_markup=search_result_keyboard(),
-        )
+        kw = update.message.text.strip()
+        rows, total = list_internships(search=kw, limit=PAGE_SIZE, offset=0)
+        if not rows:
+            text = f"No results for *{kw}*."
+            await update.message.reply_text(
+                text, parse_mode="Markdown",
+                reply_markup=search_result_keyboard(),
+            )
+        else:
+            await update.message.reply_text(
+                _page_text(rows, 0, total, f"🔍 *Results for \"{kw}\"*"),
+                parse_mode="Markdown",
+                disable_web_page_preview=True,
+                reply_markup=pagination_keyboard(0, total, f"search:{kw}"),
+            )
+        # Stay in search state for next query
 
     elif state == WAITING_FILTER:
         kw = update.message.text.strip()
@@ -367,7 +442,7 @@ async def broadcast_new(app: Application, new_entries: list[dict]):
                 parse_mode="Markdown",
                 disable_web_page_preview=True,
                 reply_markup=InlineKeyboardMarkup([[
-                    InlineKeyboardButton("📋 Browse all", callback_data="action:list"),
+                    InlineKeyboardButton("📋 Browse all", callback_data="action:list:0"),
                     InlineKeyboardButton("📊 Status",     callback_data="action:status"),
                 ]]),
             )
