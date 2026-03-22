@@ -335,7 +335,8 @@ async def on_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         current_str = f"\n\nCurrent filter: *{current}*" if current else ""
         ctx.user_data["state"] = WAITING_FILTER
         await query.edit_message_text(
-            f"🔑 Send a keyword to filter alerts (role or company).{current_str}",
+            f"🔑 Send keywords to filter alerts, separated by commas.\n"
+            f"Example: python, google, remote",
             parse_mode="Markdown",
             reply_markup=InlineKeyboardMarkup([[
                 InlineKeyboardButton("« Cancel", callback_data="action:menu")
@@ -427,11 +428,11 @@ async def broadcast_new(app: Application, new_entries: list[dict]):
     subscribers = get_subscribers()
     for user in subscribers:
         kw = user["keyword_filter"]
+        filters_list = str(kw).strip().split(",") if kw else []
         matches = (
             [e for e in new_entries
-             if kw.lower() in (e["company"] or "").lower()
-             or kw.lower() in (e["role"] or "").lower()]
-            if kw else new_entries
+             if any(k.lower() in (e["company"] or "").lower() or k.lower() in (e["role"] or "").lower() for k in filters_list)]
+            if filters_list else new_entries
         )
         if not matches:
             continue
