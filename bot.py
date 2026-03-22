@@ -500,7 +500,16 @@ async def broadcast_new(app: Application, new_entries: list[dict]):
         except Exception as exc:
             logger.warning("Failed to send to %s: %s", user["chat_id"], exc)
 
-
+# Sends a message about developer info to the user
+async def cmd_info(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "👨‍💻 *Developer Info*\n\n"
+        "This bot was developed by [Nursultan Tumenbay].\n"
+        "GitHub: [github.com/Nurswizz](https://github.com/Nurswizz)\n"
+        "Telegram: [@nurswizz](https://t.me/Nurswizz)\n\n"
+        "Feel free to reach out for any questions or feedback!",
+        parse_mode="Markdown",
+    )
 # ── app factory ───────────────────────────────────────────────────────────────
 
 def build_app() -> Application:
@@ -511,6 +520,7 @@ def build_app() -> Application:
     app.add_handler(CommandHandler("maintenance", cmd_maintenance))
     app.add_handler(CommandHandler("broadcast",   cmd_broadcast))
     app.add_handler(CommandHandler("cancel",      cmd_cancel))
+    app.add_handler(CommandHandler("developer_info",        cmd_info))
     app.add_handler(CallbackQueryHandler(on_button, pattern=r"^action:"))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))
     return app
