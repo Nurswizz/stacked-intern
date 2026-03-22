@@ -40,9 +40,10 @@ logger = logging.getLogger(__name__)
 
 TOKEN    = os.environ["TELEGRAM_BOT_TOKEN"]
 ADMIN_ID = int(os.environ.get("ADMIN_ID", 0))
-
-WAITING_SEARCH = 1
-WAITING_FILTER = 2
+print(ADMIN_ID)
+WAITING_SEARCH    = 1
+WAITING_FILTER    = 2
+WAITING_BROADCAST = 3
 
 PAGE_SIZE = 10
 
@@ -102,9 +103,8 @@ def filter_result_keyboard() -> InlineKeyboardMarkup:
 def pagination_keyboard(
     page: int,
     total: int,
-    action_prefix: str,   # e.g. "list" or "search:python"
+    action_prefix: str,
 ) -> InlineKeyboardMarkup:
-    """Build prev/next pagination row + back button."""
     total_pages = max(1, (total + PAGE_SIZE - 1) // PAGE_SIZE)
     nav = []
     if page > 0:
@@ -171,7 +171,7 @@ def _page_text(rows: list[dict], page: int, total: int, title: str) -> str:
     return header + body
 
 
-# ── /maintenance (admin only) ─────────────────────────────────────────────────
+# ── admin commands ────────────────────────────────────────────────────────────
 
 async def cmd_maintenance(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
@@ -193,6 +193,28 @@ async def cmd_maintenance(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             "Usage:\n`/maintenance on`\n`/maintenance off`",
             parse_mode="Markdown",
         )
+
+
+async def cmd_broadcast(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    uid = update.effective_user.id
+    if uid != ADMIN_ID:
+        await update.message.reply_text("⛔ Admin only.")
+        return
+    ctx.user_data["state"] = WAITING_BROADCAST
+    await update.message.reply_text(
+        "📣 *Send your announcement.*\n\n"
+        "Supports Markdown formatting.\n"
+        "Send /cancel to abort.",
+        parse_mode="Markdown",
+    )
+
+
+async def cmd_cancel(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    uid = update.effective_user.id
+    if uid != ADMIN_ID:
+        return
+    ctx.user_data.pop("state", None)
+    await update.message.reply_text("❌ Cancelled.")
 
 
 # ── /start & /menu ────────────────────────────────────────────────────────────
@@ -231,7 +253,6 @@ async def cmd_menu(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 # ── helpers ───────────────────────────────────────────────────────────────────
 
 async def _show_list_page(query, page: int):
-    """Render a page of recent listings."""
     rows, total = list_internships(limit=PAGE_SIZE, offset=page * PAGE_SIZE)
     if not rows:
         await query.edit_message_text(
@@ -248,7 +269,6 @@ async def _show_list_page(query, page: int):
 
 
 async def _show_search_page(query, keyword: str, page: int):
-    """Render a page of search results."""
     rows, total = list_internships(search=keyword, limit=PAGE_SIZE, offset=page * PAGE_SIZE)
     if not rows:
         await query.edit_message_text(
@@ -277,7 +297,6 @@ async def on_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text(MAINTENANCE_TEXT, parse_mode="Markdown")
         return
 
-    # callback_data format: "action:<action>[:<arg>][:<page>]"
     parts  = query.data.split(":", 2)
     action = parts[1]
     rest   = parts[2] if len(parts) > 2 else ""
@@ -310,9 +329,7 @@ async def on_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await _show_list_page(query, page)
 
     elif action == "search":
-        # rest is either empty (initial prompt) or "keyword:page"
         if not rest:
-            # Prompt user to type keyword
             ctx.user_data["state"] = WAITING_SEARCH
             await query.edit_message_text(
                 "🔍 Send me a keyword to search (role or company name):",
@@ -321,7 +338,6 @@ async def on_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 ]]),
             )
         else:
-            # rest = "keyword:page" or just "keyword" (page 0)
             if ":" in rest:
                 kw, pg = rest.rsplit(":", 1)
                 page = int(pg) if pg.isdigit() else 0
@@ -336,7 +352,7 @@ async def on_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         ctx.user_data["state"] = WAITING_FILTER
         await query.edit_message_text(
             f"🔑 Send keywords to filter alerts, separated by commas.\n"
-            f"Example: python, google, remote",
+            f"Example: _python, google, remote_{current_str}",
             parse_mode="Markdown",
             reply_markup=InlineKeyboardMarkup([[
                 InlineKeyboardButton("« Cancel", callback_data="action:menu")
@@ -387,13 +403,43 @@ async def on_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(MAINTENANCE_TEXT, parse_mode="Markdown")
         return
 
+    # ── admin broadcast ───────────────────────────────────────────────────────
+    if state == WAITING_BROADCAST and uid == ADMIN_ID:
+        message = update.message.text.strip()
+        ctx.user_data.pop("state", None)
+
+        subscribers = get_subscribers()
+        sent = failed = 0
+        status_msg = await update.message.reply_text(
+            f"📤 Sending to {len(subscribers)} subscriber(s)…"
+        )
+
+        for user in subscribers:
+            try:
+                await update.get_bot().send_message(
+                    chat_id=user["chat_id"],
+                    text=f"📣 *Announcement*\n\n{message}",
+                    parse_mode="Markdown",
+                )
+                sent += 1
+            except Exception as exc:
+                logger.warning("Broadcast failed for %s: %s", user["chat_id"], exc)
+                failed += 1
+
+        await status_msg.edit_text(
+            f"✅ Broadcast complete.\n\nSent: *{sent}*\nFailed: *{failed}*",
+            parse_mode="Markdown",
+        )
+        return
+
+    # ── search ────────────────────────────────────────────────────────────────
     if state == WAITING_SEARCH:
         kw = update.message.text.strip()
         rows, total = list_internships(search=kw, limit=PAGE_SIZE, offset=0)
         if not rows:
-            text = f"No results for *{kw}*."
             await update.message.reply_text(
-                text, parse_mode="Markdown",
+                f"No results for *{kw}*.",
+                parse_mode="Markdown",
                 reply_markup=search_result_keyboard(),
             )
         else:
@@ -403,8 +449,9 @@ async def on_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 disable_web_page_preview=True,
                 reply_markup=pagination_keyboard(0, total, f"search:{kw}"),
             )
-        # Stay in search state for next query
+        # stay in search state
 
+    # ── filter ────────────────────────────────────────────────────────────────
     elif state == WAITING_FILTER:
         kw = update.message.text.strip()
         set_user_filter(uid, kw)
@@ -422,16 +469,19 @@ async def on_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         )
 
 
-# ── broadcast (called from worker) ───────────────────────────────────────────
+# ── broadcast new listings (called from worker) ───────────────────────────────
 
 async def broadcast_new(app: Application, new_entries: list[dict]):
     subscribers = get_subscribers()
     for user in subscribers:
         kw = user["keyword_filter"]
-        filters_list = str(kw).strip().split(",") if kw else []
+        filters_list = [k.strip() for k in kw.split(",") if k.strip()] if kw else []
         matches = (
             [e for e in new_entries
-             if any(k.lower() in (e["company"] or "").lower() or k.lower() in (e["role"] or "").lower() for k in filters_list)]
+             if any(
+                 k in (e["company"] or "").lower() or k in (e["role"] or "").lower()
+                 for k in filters_list
+             )]
             if filters_list else new_entries
         )
         if not matches:
@@ -459,6 +509,8 @@ def build_app() -> Application:
     app.add_handler(CommandHandler("start",       cmd_start))
     app.add_handler(CommandHandler("menu",        cmd_menu))
     app.add_handler(CommandHandler("maintenance", cmd_maintenance))
+    app.add_handler(CommandHandler("broadcast",   cmd_broadcast))
+    app.add_handler(CommandHandler("cancel",      cmd_cancel))
     app.add_handler(CallbackQueryHandler(on_button, pattern=r"^action:"))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))
     return app
